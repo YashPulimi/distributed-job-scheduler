@@ -1,0 +1,69 @@
+name: distributed-job-scheduler
+
+x-app: &app
+  build: .
+  environment: &app-env
+    DATABASE_URL: postgresql://scheduler:scheduler@db:5432/scheduler
+    API_KEY: ${API_KEY:-local-development-only}
+    WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+    LEASE_SECONDS: ${LEASE_SECONDS:-15}
+    POLL_SECONDS: ${POLL_SECONDS:-0.25}
+    AGING_SECONDS: ${AGING_SECONDS:-30}
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: scheduler
+      POSTGRES_PASSWORD: scheduler
+      POSTGRES_DB: scheduler
+    volumes:
+      - scheduler_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scheduler -d scheduler"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  migrate:
+    <<: *app
+    command: ["python", "-m", "scheduler.init_db"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "scheduler.worker"]
+    stop_grace_period: 45s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  test:
+    <<: *app
+    profiles: ["test"]
+    environment:
+      <<: *app-env
+      TEST_DATABASE_URL: postgresql://scheduler:scheduler@db:5432/scheduler
+    command: ["pytest", "-v", "-p", "no:cacheprovider"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  scheduler_data:
+
